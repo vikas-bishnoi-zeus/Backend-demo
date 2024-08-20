@@ -16,6 +16,11 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+Task.Run(() =>
+{
+    var csvConsumerService = new CsvConsumerService(app.Configuration);
+    csvConsumerService.Start();
+});
 
 
 app.UseHttpsRedirection();

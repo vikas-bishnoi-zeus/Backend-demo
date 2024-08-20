@@ -510,3 +510,4 @@ D:\Training\Backend\Backend-demo\back\obj\Debug\net8.0\scopedcss\bundle\server.s
 D:\Training\Backend\Backend-demo\back\obj\Debug\net8.0\server.csproj.Up2Date
 D:\Training\Backend\Backend-demo\back\obj\Debug\net8.0\server.genruntimeconfig.cache
 D:\Training\Backend\Backend-demo\back\obj\Debug\net8.0\ref\server.dll
+D:\Training\Backend\Backend-demo\server\bin\Debug\net8.0\RabbitMQ.Client.dll
