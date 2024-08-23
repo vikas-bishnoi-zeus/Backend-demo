@@ -5,7 +5,8 @@ using MySqlConnector;
 using RabbitMQ.Client;
 using System.Text;
 using System.Text.Json;
-
+using Swashbuckle.AspNetCore.SwaggerUI;
+using server.Services;
 
 
 
@@ -16,26 +17,30 @@ namespace server.Controllers
     public class csvController : ControllerBase
     {
         private readonly IConfiguration _configuration;
-        private MySqlConnection connection;
+        private MySqlConnection sqlconnection;
 
-        public csvController(IConfiguration configuration)
+        private readonly CsvProducer _producer;
+
+        public csvController(IConfiguration configuration,CsvProducer producer )
         {
             _configuration = configuration;
-            connection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!);
+            sqlconnection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!);
+            _producer=producer;
         }
 
         [HttpGet]
+        [Route("getCsv")]
         public async Task<IActionResult> GetItems()
         {
             var items = new List<string>();  // Assuming the data type is string; adjust as necessary
             // items.Add("1");
-            await connection.OpenAsync();
+            await sqlconnection.OpenAsync();
 
-            using var command = new MySqlCommand("SELECT * FROM user LIMIT 1000;", connection);
+            using var command = new MySqlCommand("SELECT * FROM user LIMIT 1000;", sqlconnection);
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                var value = reader.GetValue(1).ToString();  // Adjust indexing and type as per your actual table schema
+                string? value = reader.GetValue(1).ToString();  // Adjust indexing and type as per your actual table schema
                 // Console.WriteLine(value);
                 items.Add(value);
             }
@@ -44,7 +49,7 @@ namespace server.Controllers
         }
 
         [HttpPost]
-        [Route("handleCsv")]
+        [Route("uploadCsv")]
         public async Task<IActionResult> HandleCsv(IFormFile file)
         {
             if (file == null || file.Length == 0)
@@ -55,29 +60,38 @@ namespace server.Controllers
             await file.CopyToAsync(stream);
             var csvContent = Encoding.UTF8.GetString(stream.ToArray());
             List<DataModels> jsonContent = ConverStringToJson(csvContent);
-            var factory = new ConnectionFactory() { HostName = "localhost" }; // Adjust RabbitMQ connection settings as needed
-            using var connection = factory.CreateConnection();
-            using var channel = connection.CreateModel();
-
-            channel.QueueDeclare(queue: "csvQueue",
-                                durable: true,
-                                exclusive: false,
-                                autoDelete: false,
-                                arguments: null);
-
+            
+            Console.WriteLine("start time " + ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeMilliseconds());
             foreach (var chunk in jsonContent.Chunk(10000))
             {
-                var message = JsonSerializer.Serialize(chunk);
-                var body = Encoding.UTF8.GetBytes(message);
-
-                channel.BasicPublish(exchange: "",
-                                     routingKey: "csvQueue",
-                                     basicProperties: null,
-                                     body: body);
+                // Console.WriteLine("Radha Krishna");
+                _producer.produce(chunk);
             }
             Console.WriteLine("Adding to mq");
             return Ok("CSV data added to RabbitMQ");
         }
+
+        [HttpPut()]
+        [Route("updateRecord")]
+        public async Task<IActionResult> PutEmployeeRecord(DataModels record)
+        {
+            var sql = new StringBuilder("UPDATE USER SET ");
+            var properties = record.GetType().GetProperties();
+            foreach (var field in properties)
+            {
+                sql.Append($"{field.Name}='{field.GetValue(record)}',");
+            }
+            sql.Length--;
+            sql.Append($" WHERE email_id='{record.email_id}';");
+            await sqlconnection.OpenAsync();
+            using var command = new MySqlCommand(sql.ToString(), sqlconnection);
+            var result=await command.ExecuteNonQueryAsync();
+            await sqlconnection.CloseAsync();
+            if (result == 0) { return BadRequest(); };
+            return Ok(result);
+        }
+
+        
         private List<DataModels> ConverStringToJson(string content)
         {
             var line = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
