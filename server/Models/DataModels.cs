@@ -2,6 +2,7 @@ namespace server.Models;
 
 public class DataModels
 {
+    public int? row_num{get;set;}
     public string? email_id{get;set;}
     public string? name { get; set; }
     public string? country { get; set; }

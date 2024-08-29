@@ -13,6 +13,10 @@ public class CsvProducer  {
     private readonly IModel _channel;
     private readonly CsvConsumer _consumer;
     public int currQueueIndex;
+    private int val=0;
+    private List<Task> consumed=new List<Task>();
+
+
     public CsvProducer(IConnectionFactory connectionFactory, CsvConsumer consumer)
     {
         _connectionFactory = connectionFactory;
@@ -31,20 +35,16 @@ public class CsvProducer  {
         }
     }
 
-    public void produce(DataModels[] chunk) {{
-        var watch = new System.Diagnostics.Stopwatch();
-        watch.Start();
+    public async Task produce(DataModels[] chunk) {{
         currQueueIndex = (currQueueIndex == 5) ? 0 : currQueueIndex;
         var message = JsonSerializer.Serialize(chunk);
         var body = Encoding.UTF8.GetBytes(message);
         
         _channel.BasicPublish(exchange: "", routingKey: $"queue{currQueueIndex}", body: body);
-
-        _consumer.Consume(currQueueIndex);
-
+        consumed.Add(Task.Run(()=>_consumer.Consume(currQueueIndex)));
+        await Task.WhenAll(consumed.Where(t=>t!=null));
+        Console.WriteLine(currQueueIndex);
         // currQueueIndex++;
-
-        watch.Stop();
     }}
 
 }

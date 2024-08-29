@@ -12,14 +12,13 @@ public class CsvConsumer
      private readonly IConfiguration _configuration;
     private readonly IConnectionFactory _connectionFactory;
     private readonly IConnection _connection;
-    private readonly string? _sqlConnectionString;
     private readonly IModel _channel;
 
     long timeExc=0;
+    private List<Task> insert=new List<Task>();
     public CsvConsumer(IConfiguration configuration,IConnectionFactory connectionFactory)
     {
         _configuration = configuration;
-        _sqlConnectionString = _configuration.GetConnectionString("DefaultConnection");
 
         _connectionFactory = connectionFactory;
         _connection = _connectionFactory.CreateConnection();
@@ -36,13 +35,14 @@ public class CsvConsumer
         }
     }
 
-    public void Consume(int queueNumber)
+    public async Task Consume(int queueNumber)
     {
 
         var consumer = new EventingBasicConsumer(_channel);
-        long time=0;
-        
-        consumer.Received +=  (model, ea) =>
+        // long time=0;
+        Console.WriteLine(_channel.MessageCount("queue0"));
+
+        consumer.Received += (model, ea) =>
         {
             var body = ea.Body.ToArray();
             var message = Encoding.UTF8.GetString(body);
@@ -51,27 +51,26 @@ public class CsvConsumer
 
             if (csvRecords != null)
             {
-                var watch = new System.Diagnostics.Stopwatch();
-                watch.Start();
-                Task.Run(async () => {
-                    MultipleInsert(csvRecords);
-                });
-                watch.Stop();
-                // Console.WriteLine(watch.ElapsedMilliseconds);
-                time+=watch.ElapsedMilliseconds;
-                Console.WriteLine($"total time:-{time}");
+                // Console.WriteLine("BConsume");
+                insert.Add(Task.Run(async () => {
+                    await MultipleInsert(csvRecords);
+                }));
+                // Console.WriteLine();
+                // Console.WriteLine($"total time:-{time}");
 
             }
         };
+        await Task.WhenAll(insert.Where(t=>t!=null));
 
         _channel.BasicConsume(queue: $"queue{queueNumber}", autoAck: true, consumer: consumer);
+        Console.WriteLine($"Consume {_channel.MessageCount("queue0")}");
     }
 
-    private async void MultipleInsert(List<DataModels> csvRecords)
+    private async Task MultipleInsert(List<DataModels> csvRecords)
     {
         using var connection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!);
         var sql = new StringBuilder();
-        sql.Append("INSERT INTO user (email_id, name, country, state, city, telephone_number, address_line_1, address_line_2, date_of_birth, gross_salary_FY2019_20, gross_salary_FY2020_21, gross_salary_FY2021_22, gross_salary_FY2022_23, gross_salary_FY2023_24) VALUES ");
+        sql.Append("INSERT INTO user (row_num,email_id, name, country, state, city, telephone_number, address_line_1, address_line_2, date_of_birth, gross_salary_FY2019_20, gross_salary_FY2020_21, gross_salary_FY2021_22, gross_salary_FY2022_23, gross_salary_FY2023_24) VALUES ");
 
         foreach (var record in csvRecords)
         {
@@ -97,7 +96,7 @@ public class CsvConsumer
         await connection.CloseAsync();
         watch.Stop();
         timeExc+=watch.ElapsedMilliseconds;
-                    Console.WriteLine("end time " +( ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeMilliseconds()+3000));
+        Console.WriteLine("end time " +( ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeMilliseconds()+3000));
     }
 
 }
