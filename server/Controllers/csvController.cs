@@ -2,13 +2,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using server.Models;
 using MySqlConnector;
-using RabbitMQ.Client;
 using System.Text;
-using System.Text.Json;
-using Swashbuckle.AspNetCore.SwaggerUI;
 using server.Services;
-
-
 
 namespace server.Controllers
 {
@@ -17,44 +12,71 @@ namespace server.Controllers
     public class csvController : ControllerBase
     {
         private readonly IConfiguration _configuration;
-        // private MySqlConnection sqlconnection;
 
         private readonly CsvProducer _producer;
 
+        // Constructor to inject configuration and producer dependencies
         public csvController(IConfiguration configuration, CsvProducer producer)
         {
             _configuration = configuration;
-            // sqlconnection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!);
             _producer = producer;
         }
 
+        // Endpoint to get items from the database with lazy loading
         [HttpPost]
         [Route("GetItems")]
         public async Task<IActionResult> GetItems([FromBody] DataRange range)
         {
-            var items = new List<List<string>>();  // Assuming the data type is string; adjust as necessary
-            // items.Add("1");
-            using (var connection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!))
+            if (range == null || range.limit <= 0 || range.offset < 0)
             {
+                return BadRequest("Invalid range specified.");
+            }
+            var items = new List<List<string>>();  // List to store the retrieved data
+
+            var connectionString = _configuration.GetConnectionString("DefaultConnection");
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                return StatusCode(500, "Database connection string is not configured.");
+            }
+            try
+            {
+                // Create and open a new database connection
+                await using var connection = new MySqlConnection(connectionString);
                 await connection.OpenAsync();
-                using var command = new MySqlCommand($"SELECT * FROM user order By row_num LIMIT {range.offset},{range.limit};", connection);
+
+
+                // SQL command to fetch data with offset and limit
+                var sqlQuery = "SELECT * FROM user ORDER BY row_num LIMIT @offset, @limit;";
+                using var command = new MySqlCommand(sqlQuery, connection);
+
+                // Add parameters to avoid SQL injection
+                command.Parameters.AddWithValue("@offset", range.offset);
+                command.Parameters.AddWithValue("@limit", range.limit);
+
+                // Execute the command and read the data
                 using var reader = await command.ExecuteReaderAsync();
-                // Console.WriteLine(range.offset);
-                // Console.WriteLine(range.limit);
+
+                // Reading each row and adding to the items list
                 while (await reader.ReadAsync())
                 {
-
-                    // Console.WriteLine(reader.FieldCount);
                     var value = new List<string>();
                     for (int i = 0; i < reader.FieldCount; i++)
                     {
-                        String? cur = reader.GetValue(i).ToString();
-                        value.Add(cur);
+                        // Handle null values safely
+                        string cell = reader.GetValue(i).ToString() ?? string.Empty;
+                        value.Add(reader.IsDBNull(i) ? string.Empty : cell);
+
                     }
                     items.Add(value);
                 }
-                Console.WriteLine("get");
+                Console.WriteLine("get Request");
 
+            }
+            catch (Exception ex)
+            {
+                // Log the error and return an appropriate response
+                Console.WriteLine($"Error retrieving items: {ex.Message}");
+                return StatusCode(500, "An error occurred while retrieving data.");
             }
 
 
@@ -62,64 +84,137 @@ namespace server.Controllers
         }
 
         [HttpPost]
-        [Route("uploadCsv")]
-        public async Task<IActionResult> uploadCsv(IFormFile file)
+        [Route("UploadCsv")]
+        public async Task<IActionResult> UploadCsv(IFormFile file)
         {
-            // Console.WriteLine("uploading backend");
             if (file == null || file.Length == 0)
             {
-                return BadRequest("File not found!");
+                return BadRequest("File not found or is empty.");
             }
-            using var stream = new MemoryStream();
-            await file.CopyToAsync(stream);
-            var csvContent = Encoding.UTF8.GetString(stream.ToArray());
-            List<DataModels> jsonContent = ConverStringToJson(csvContent);
-
-            Console.WriteLine("start time " + ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeMilliseconds());
-            List<Task> upload = new List<Task>();
-            foreach (var chunk in jsonContent.Chunk(10000))
+            List<DataModels> jsonContent;
+            try
             {
-                // Console.WriteLine("Radha Krishna");
-                // upload.Add(Task.Run(()=>_producer.produce(chunk)));
-                await _producer.produce(chunk);
+                // Read the CSV file content
+                using var stream = new MemoryStream();
+                await file.CopyToAsync(stream);
+                var csvContent = Encoding.UTF8.GetString(stream.ToArray());
+
+                // Convert CSV content to a list of DataModels
+                jsonContent = ConvertStringToJson(csvContent);
             }
-            // await Task.WhenAll(upload.Where(t=>t!=null));
-            Console.WriteLine("Adding to mq");
-            return Ok("CSV data added to RabbitMQ");
+            catch (Exception ex)
+            {
+                // Log and return an error if something goes wrong during file processing
+                Console.WriteLine($"Error processing file: {ex.Message}");
+                return StatusCode(500, "Error processing the CSV file.");
+            }
+
+            try
+            {
+                // Process the data in chunks and send to RabbitMQ
+                foreach (var chunk in jsonContent.Chunk(10000))
+                {
+                    await _producer.produce(chunk);
+                }
+
+                Console.WriteLine("Data added to RabbitMQ successfully.");
+                return Ok("CSV data added to RabbitMQ");
+            }
+            catch (Exception ex)
+            {
+                // Log and return an error if something goes wrong during the RabbitMQ processing
+                Console.WriteLine($"Error adding data to RabbitMQ: {ex.Message}");
+                return StatusCode(500, "Error sending data to RabbitMQ.");
+            }
         }
+
 
         [HttpPost()]
-        [Route("updateRecord")]
-        public async Task<IActionResult> updateRecord([FromBody] DataModels record)
+        [Route("UpdateRecord")]
+        public async Task<IActionResult> UpdateRecord([FromBody] DataModels record)
         {
-            Console.WriteLine("Updating");
-            var sql = new StringBuilder("UPDATE USER SET ");
-            var properties = record.GetType().GetProperties();
-            foreach (var field in properties)
+            // Validate the incoming record
+            if (record == null)
             {
-                sql.Append($"{field.Name}='{field.GetValue(record)}',");
+                return BadRequest("Invalid record data.");
             }
-            sql.Length--;
-            sql.Append($" WHERE row_num={record.row_num};");
-            Console.WriteLine(sql.ToString());
-            using (var connection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!))
+            // Log the start of the update process
+            Console.WriteLine("Starting update for record with row_num: " + record.row_num);
+
+            // Build the SQL update statement dynamically
+            var sql = new StringBuilder("UPDATE USER SET ");
+
+            var properties = record.GetType().GetProperties();
+
+            // Append each property and its value to the SQL update statement
+            foreach (var property in properties)
             {
+                // Ensure the value is correctly formatted, handling nulls as empty strings
+                string value = property.GetValue(record)?.ToString() ?? string.Empty;
+                // Properly escape single quotes to prevent SQL injection
+                string escapedValue = value.Replace("'", "''");
+                sql.Append($"{property.Name}='{escapedValue}',");
+            }
+            // Remove the trailing comma from the SQL statement
+            sql.Length--;
+
+            // Add the WHERE clause to target the specific record by row number
+            sql.Append($" WHERE row_num={record.row_num};");
+
+            // Log the generated SQL query for debugging purposes
+            Console.WriteLine(sql.ToString());
+
+            // Execute the update query within a try-catch block for error handling
+            try
+            {
+                var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    return StatusCode(500, "Database connection string is not configured.");
+                }
+                await using var connection = new MySqlConnection(connectionString);
                 await connection.OpenAsync();
-                using var command = new MySqlCommand(sql.ToString(), connection);
+                await using var command = new MySqlCommand(sql.ToString(), connection);
+
+                // Execute the query and get the number of affected rows
                 var result = await command.ExecuteNonQueryAsync();
+
+                // Close the connection explicitly (optional due to using statement)
                 await connection.CloseAsync();
-                if (result == 0) { 
-                    return BadRequest(); 
+
+                // Check if any rows were affected, indicating a successful update
+                if (result == 0)
+                {
+                    // Log the failure and return a BadRequest response
+                    Console.WriteLine("Update failed: No records were affected.");
+                    return BadRequest("Update failed: No records were affected.");
                 }
-                else{
-                    return Ok(result);
-                }
+
+                // Log the success and return an Ok response with the number of affected rows
+                Console.WriteLine($"Update successful: {result} record(s) updated.");
+                return Ok(new { Message = "Update successful", RowsAffected = result });
+            }
+            catch (MySqlException ex)
+            {
+                // Log the exception and return an InternalServerError response
+                Console.WriteLine($"Database error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An error occurred while updating the record.");
+            }
+            catch (Exception ex)
+            {
+                // Log unexpected exceptions and return an InternalServerError response
+                Console.WriteLine($"Unexpected error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred.");
             }
         }
 
 
-        private List<DataModels> ConverStringToJson(string content)
+        private List<DataModels> ConvertStringToJson(string content)
         {
+            if (string.IsNullOrEmpty(content))
+            {
+                throw new ArgumentException("Content cannot be null or empty", nameof(content));
+            }
             int rowNo = 0;
             var line = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             var headers = line[0].Split(',');
@@ -151,77 +246,6 @@ namespace server.Controllers
             }
             return csvData;
         }
-
-
-
-        // [HttpPost]
-        // [Route("handleCsv")]
-        // public async Task<IActionResult> HandleCsv(IFormFile file)
-        // {
-        //     var watch = new System.Diagnostics.Stopwatch();
-        //     watch.Start();
-        //     if (file == null || file.Length == 0)
-        //     {
-        //         return BadRequest("File not found!!");
-        //     }
-        //     using var stream = new MemoryStream();
-        //     await file.CopyToAsync(stream);
-        //     var csvContent = Encoding.UTF8.GetString(stream.ToArray());
-        //     List<DataModels> jsonContent = ConverStringToJson(csvContent);
-        //     await MultipleInsert(jsonContent);
-        //     watch.Stop();
-        //     Console.WriteLine($"Execution Time: {watch.ElapsedMilliseconds} ms");
-        //     return Ok("Csv data added to MySQL");
-        // }
-
-        // private List<DataModels> ConverStringToJson(string content)
-        // {
-        //     var line = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-        //     var headers = line[0].Split(',');
-        //     var csvData = new List<DataModels>();
-        //     foreach (var l in line.Skip(1))
-        //     {
-        //         var values = l.Split(',');
-        //         var row = new DataModels
-        //         {
-        //             email_id = values[0],
-        //             name = values[1],
-        //             country = values[2],
-        //             state = values[3],
-        //             city = values[4],
-        //             telephone_number = values[5],
-        //             address_line_1 = values[6],
-        //             address_line_2 = values[7],
-        //             date_of_birth = values[8],
-        //             gross_salary_FY2019_20 = values[9],
-        //             gross_salary_FY2020_21 = values[10],
-        //             gross_salary_FY2021_22 = values[11],
-        //             gross_salary_FY2022_23 = values[12],
-        //             gross_salary_FY2023_24 = values[13],
-        //         };
-        //         csvData.Add(row);
-        //     }
-        //     return csvData;
-        // }
-
-        // private async Task MultipleInsert(List<DataModels> csvRecords)
-        // {
-        //     await connection.OpenAsync();
-        //     var sql = new StringBuilder("TRUNCATE TABLE user;");
-        //     // sql.Append("INSERT INTO user (email_id, name) VALUES ");
-        //     sql.Append("INSERT INTO user (email_id, name, country, state,city, telephone_number, address_line_1, address_line_2, date_of_birth, gross_salary_FY2019_20, gross_salary_FY2020_21, gross_salary_FY2021_22, gross_salary_FY2022_23, gross_salary_FY2023_24) VALUES ");
-
-        //     foreach (var record in csvRecords)
-        //     {
-        //         sql.Append($"('{record.email_id}', '{record.name}', '{record.country}', '{record.state}','{record.city}', '{record.telephone_number}', '{record.address_line_1}', '{record.address_line_2}', '{record.date_of_birth}', {record.gross_salary_FY2019_20}, {record.gross_salary_FY2020_21}, {record.gross_salary_FY2021_22}, {record.gross_salary_FY2022_23}, {record.gross_salary_FY2023_24}),");
-        //     }
-        //     sql.Length--;
-        //     // Console.WriteLine(sql.ToString());
-        //     using var command = new MySqlCommand(sql.ToString(), connection);
-        //     await command.ExecuteNonQueryAsync();
-        // }
-
-
 
     }
 }

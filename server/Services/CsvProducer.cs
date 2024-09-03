@@ -13,7 +13,6 @@ public class CsvProducer  {
     private readonly IModel _channel;
     private readonly CsvConsumer _consumer;
     public int currQueueIndex;
-    private int val=0;
     private List<Task> consumed=new List<Task>();
 
 
