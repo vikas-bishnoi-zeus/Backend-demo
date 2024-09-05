@@ -4,7 +4,6 @@ using System.Text;
 using System.Text.Json;
 
 
-
 namespace server.Services;
 public class CsvProducer  {
 
@@ -33,16 +32,21 @@ public class CsvProducer  {
                         arguments: null);
         }
     }
-
-    public async Task produce(DataModels[] chunk) {{
+    // Call this when a new upload begins
+    public void ResetProgress(int totalChunck)
+    {
+        _consumer.ResetProgress(totalChunck);
+    }
+    public  async void produce(DataModels[] chunk) {{
         currQueueIndex = (currQueueIndex == 5) ? 0 : currQueueIndex;
         var message = JsonSerializer.Serialize(chunk);
         var body = Encoding.UTF8.GetBytes(message);
+        Console.WriteLine($"P {currQueueIndex}");
         
         _channel.BasicPublish(exchange: "", routingKey: $"queue{currQueueIndex}", body: body);
         consumed.Add(Task.Run(()=>_consumer.Consume(currQueueIndex)));
         await Task.WhenAll(consumed.Where(t=>t!=null));
-        Console.WriteLine(currQueueIndex);
+        // Console.WriteLine(currQueueIndex);
         // currQueueIndex++;
     }}
 

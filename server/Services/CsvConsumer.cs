@@ -5,6 +5,12 @@ using System.Text.Json;
 using MySqlConnector;
 using server.Models;
 using System.Threading.Channels;
+using Microsoft.AspNetCore.SignalR;
+using server.Hubs;
+using System.Runtime.InteropServices;
+using Microsoft.AspNetCore.Razor.Language.Intermediate;
+
+
 
 namespace server.Services;
 public class CsvConsumer
@@ -14,33 +20,33 @@ public class CsvConsumer
     private readonly IConnection _connection;
     private readonly IModel _channel;
 
-    long timeExc=0;
+    private readonly IHubContext<ProgressHub>? _hubContext;
+
+    int numberOfQueues=0;
     private List<Task> insert=new List<Task>();
-    public CsvConsumer(IConfiguration configuration,IConnectionFactory connectionFactory)
+    private int totalChunksProcessed;
+    private int totalChunksExpected;
+    public CsvConsumer(IConfiguration configuration,IConnectionFactory connectionFactory, IHubContext<ProgressHub> hubContext)
     {
         _configuration = configuration;
 
         _connectionFactory = connectionFactory;
+        _hubContext = hubContext;
         _connection = _connectionFactory.CreateConnection();
         _channel = _connection.CreateModel();
+        int expectChunk=10;
+        ResetProgress(expectChunk);
 
-        int numberOfQueues = 5;
-
-        for (int i = 0; i < numberOfQueues; i++)
-        {
-            _channel.QueueDeclare(queue: $"queue{i}",
-                            durable: false,
-                            exclusive: false,
-                            arguments: null);
-        }
     }
-
+    // Call this when a new upload begins
+    public void ResetProgress(int totalChunck)
+    {
+        totalChunksProcessed = 0;
+        totalChunksExpected=totalChunck;
+    }
     public async Task Consume(int queueNumber)
     {
-
         var consumer = new EventingBasicConsumer(_channel);
-        // long time=0;
-        Console.WriteLine(_channel.MessageCount("queue0"));
 
         consumer.Received += (model, ea) =>
         {
@@ -51,21 +57,32 @@ public class CsvConsumer
 
             if (csvRecords != null)
             {
-                // Console.WriteLine("BConsume");
                 insert.Add(Task.Run(async () => {
                     await MultipleInsert(csvRecords);
+                    await UpdateProgress();
                 }));
-                // Console.WriteLine();
-                // Console.WriteLine($"total time:-{time}");
 
             }
         };
         await Task.WhenAll(insert.Where(t=>t!=null));
-
+        Console.WriteLine(queueNumber);
         _channel.BasicConsume(queue: $"queue{queueNumber}", autoAck: true, consumer: consumer);
-        Console.WriteLine($"Consume {_channel.MessageCount("queue0")}");
     }
+    private async Task UpdateProgress()
+    {
+        if (_hubContext == null){
+            throw new InvalidOperationException("HubContext is not available.");
+        }
+        totalChunksProcessed++;
 
+        // Calculate percentage (assume 10 chunks)
+        var progressPercentage = totalChunksProcessed /(double)totalChunksExpected;
+
+        Console.WriteLine($"Chunk {totalChunksProcessed} processed. Progress: {progressPercentage}%");
+
+        // Send progress to frontend via SignalR
+        await _hubContext.Clients.All.SendAsync("ReceiveProgress", progressPercentage*100);
+    }
     private async Task MultipleInsert(List<DataModels> csvRecords)
     {
         using var connection = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")!);
@@ -82,7 +99,6 @@ public class CsvConsumer
             }
             sql.Length--;
             sql.Append("),");
-            //sql.Append($"('{record.email_id}', '{record.name}', '{record.country}', '{record.state}', '{record.city}', '{record.telephone_number}', '{record.address_line_1}', '{record.address_line_2}', '{record.date_of_birth}', {record.gross_salary_FY2019_20}, {record.gross_salary_FY2020_21}, {record.gross_salary_FY2021_22}, {record.gross_salary_FY2022_23}, {record.gross_salary_FY2023_24+2}),");
         }
         sql.Length--;
 
@@ -90,13 +106,10 @@ public class CsvConsumer
         watch.Start();
         await connection.OpenAsync();
 
-        // Console.WriteLine(sql.ToString());
+        Console.WriteLine("Sql complete");
         using var command = new MySqlCommand(sql.ToString(), connection);
         await command.ExecuteNonQueryAsync();
         await connection.CloseAsync();
-        watch.Stop();
-        timeExc+=watch.ElapsedMilliseconds;
-        Console.WriteLine("end time " +( ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeMilliseconds()+3000));
     }
 
 }

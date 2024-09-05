@@ -111,11 +111,14 @@ namespace server.Controllers
 
             try
             {
+                int totalChunck=0;
                 // Process the data in chunks and send to RabbitMQ
                 foreach (var chunk in jsonContent.Chunk(10000))
                 {
-                    await _producer.produce(chunk);
+                    totalChunck++;
+                    _producer.produce(chunk);
                 }
+                _producer.ResetProgress(totalChunck);
 
                 Console.WriteLine("Data added to RabbitMQ successfully.");
                 return Ok("CSV data added to RabbitMQ");
@@ -218,7 +221,7 @@ namespace server.Controllers
             int rowNo = 0;
             var line = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             var headers = line[0].Split(',');
-            Console.WriteLine(headers[0]);
+            // Console.WriteLine(headers[0]);
             var csvData = new List<DataModels>();
             foreach (var l in line)
             {
