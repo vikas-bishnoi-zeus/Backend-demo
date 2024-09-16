@@ -4,6 +4,7 @@ using server.Models;
 using MySqlConnector;
 using System.Text;
 using server.Services;
+using NuGet.Protocol.Core.Types;
 
 namespace server.Controllers
 {
@@ -111,7 +112,7 @@ namespace server.Controllers
 
             try
             {
-                int totalChunck=0;
+                int totalChunck = 0;
                 // Process the data in chunks and send to RabbitMQ
                 foreach (var chunk in jsonContent.Chunk(10000))
                 {
@@ -142,30 +143,36 @@ namespace server.Controllers
                 return BadRequest("Invalid record data.");
             }
             // Log the start of the update process
-            Console.WriteLine("Starting update for record with row_num: " + record.row_num);
+            // Console.WriteLine("Starting update for record with row_num: " + record.row_num);
 
             // Build the SQL update statement dynamically
             var sql = new StringBuilder("UPDATE USER SET ");
-
+            // Console.WriteLine(sql.ToString());
             var properties = record.GetType().GetProperties();
 
             // Append each property and its value to the SQL update statement
             foreach (var property in properties)
             {
+                if (property.Name == "row_num")
+                {
+                    continue;
+                }
                 // Ensure the value is correctly formatted, handling nulls as empty strings
                 string value = property.GetValue(record)?.ToString() ?? string.Empty;
                 // Properly escape single quotes to prevent SQL injection
                 string escapedValue = value.Replace("'", "''");
                 sql.Append($"{property.Name}='{escapedValue}',");
+                // Console.WriteLine(sql.ToString());
             }
             // Remove the trailing comma from the SQL statement
             sql.Length--;
 
             // Add the WHERE clause to target the specific record by row number
-            sql.Append($" WHERE row_num={record.row_num};");
+            sql.Append($" WHERE email_id='{record.email_id}';");
 
             // Log the generated SQL query for debugging purposes
-            Console.WriteLine(sql.ToString());
+            // String temp=sql.ToString();
+            // Console.WriteLine(temp);
 
             // Execute the update query within a try-catch block for error handling
             try
@@ -182,7 +189,6 @@ namespace server.Controllers
                 // Execute the query and get the number of affected rows
                 var result = await command.ExecuteNonQueryAsync();
 
-                // Close the connection explicitly (optional due to using statement)
                 await connection.CloseAsync();
 
                 // Check if any rows were affected, indicating a successful update
@@ -212,6 +218,84 @@ namespace server.Controllers
         }
 
 
+        [HttpPost()]
+        [Route("BulkUpdate")]
+        public async Task<IActionResult> BulkUpdate(DataModels[] records)
+        {
+            // Validate the incoming array of records
+            Console.WriteLine("Bulk Updating");
+            Console.WriteLine(records);
+            if (records == null || records.Length == 0)
+            {
+                return BadRequest("No records provided for update.");
+            }
+
+            try
+            {
+                var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    return StatusCode(500, "Database connection string is not configured.");
+                }
+
+                await using var connection = new MySqlConnection(connectionString);
+                await connection.OpenAsync();
+                await using var transaction = await connection.BeginTransactionAsync(); // Start transaction
+
+                var sql = new StringBuilder();
+
+                foreach (var record in records)
+                {
+                    if (record == null) continue;
+
+                    // Build the SQL update statement for each record
+                    var updateSql = new StringBuilder("UPDATE USER SET ");
+                    var properties = record.GetType().GetProperties();
+
+                    // Append each property and its value to the SQL update statement
+                    foreach (var property in properties)
+                    {
+                        if (property.Name == "email_id" || property.Name == "row_num")
+                        {
+                            continue;
+                        }
+                        string value = property.GetValue(record)?.ToString() ?? string.Empty;
+                        string escapedValue = value.Replace("'", "''");
+                        updateSql.Append($"{property.Name}='{escapedValue}',");
+                    }
+
+                    updateSql.Length--;  // Remove trailing comma
+                    updateSql.Append($" WHERE email_id='{record.email_id}';");
+
+                    // Append this update query to the main SQL command
+                    sql.Append(updateSql);
+                }
+
+                // Execute the combined SQL update in one command
+                await using var command = new MySqlCommand(sql.ToString(), connection, transaction);
+                var result = await command.ExecuteNonQueryAsync();
+
+                // Commit the transaction
+                await transaction.CommitAsync();
+
+                await connection.CloseAsync();
+
+                // Return the result of the bulk update
+                return Ok(new { Message = "Bulk update successful", TotalUpdatedRecords = result });
+            }
+            catch (MySqlException ex)
+            {
+                // Log the exception and return an InternalServerError response
+                Console.WriteLine($"Database error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An error occurred while updating the records.");
+            }
+            catch (Exception ex)
+            {
+                // Log unexpected exceptions and return an InternalServerError response
+                Console.WriteLine($"Unexpected error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred.");
+            }
+        }
         private List<DataModels> ConvertStringToJson(string content)
         {
             if (string.IsNullOrEmpty(content))
@@ -250,5 +334,109 @@ namespace server.Controllers
             return csvData;
         }
 
+        [HttpPost()]
+        [Route("DeleteRow")]
+        public async Task<IActionResult> DeleteRow([FromBody] string email_id)
+        {
+            try
+            {
+                var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    return StatusCode(500, "Database connection string is not configured.");
+                }
+
+                await using var connection = new MySqlConnection(connectionString);
+                await connection.OpenAsync();
+
+                var sql = new StringBuilder("delete from user where email_id=@email_id;");
+
+                // Execute the combined SQL update in one command
+                await using var command = new MySqlCommand(sql.ToString(), connection);
+                // Add parameters to avoid SQL injection
+                command.Parameters.AddWithValue("@email_id", email_id);
+                Console.WriteLine(email_id);
+                var result = await command.ExecuteNonQueryAsync();
+
+                await connection.CloseAsync();
+
+                // Return the result of the bulk update
+                return Ok(new { Message = "Delete successful", email_id });
+            }
+            catch (MySqlException ex)
+            {
+                // Log the exception and return an InternalServerError response
+                Console.WriteLine($"Database error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An error occurred while Deleting the records.");
+            }
+            catch (Exception ex)
+            {
+                // Log unexpected exceptions and return an InternalServerError response
+                Console.WriteLine($"Unexpected error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred.");
+            }
+
+        }
+
+        [HttpPost()]
+        [Route("FindAndReplace")]
+        public async Task<IActionResult> FindAndReplace([FromBody] FindReplaceRequest request)
+        {
+
+            if (request == null || string.IsNullOrEmpty(request.FindText) || request.ReplaceText == null)
+            {
+                return BadRequest("Invalid find and replace parameters.");
+            }
+            try
+            {
+                var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    return StatusCode(500, "Database connection string is not configured.");
+                }
+
+                await using var connection = new MySqlConnection(connectionString);
+                await connection.OpenAsync();
+
+                // Building the SQL query to update all fields containing the FindText
+                var query = new StringBuilder();
+                query.Append("UPDATE user SET ");
+                query.Append("name = REPLACE(name, @FindText, @ReplaceText), ");
+                query.Append("country = REPLACE(country, @FindText, @ReplaceText), ");
+                query.Append("state = REPLACE(state, @FindText, @ReplaceText), ");
+                query.Append("telephone_number = REPLACE(telephone_number, @FindText, @ReplaceText), ");
+                query.Append("address_line_1 = REPLACE(address_line_1, @FindText, @ReplaceText), ");
+                query.Append("address_line_2 = REPLACE(address_line_2, @FindText, @ReplaceText), ");
+                query.Append("date_of_birth = REPLACE(date_of_birth, @FindText, @ReplaceText), ");
+                query.Append("gross_salary_FY2019_20 = REPLACE(gross_salary_FY2019_20, @FindText, @ReplaceText), ");
+                query.Append("gross_salary_FY2020_21 = REPLACE(gross_salary_FY2020_21, @FindText, @ReplaceText), ");
+                query.Append("gross_salary_FY2021_22 = REPLACE(gross_salary_FY2021_22, @FindText, @ReplaceText), ");
+                query.Append("gross_salary_FY2022_23 = REPLACE(gross_salary_FY2022_23, @FindText, @ReplaceText), ");
+                query.Append("gross_salary_FY2023_24 = REPLACE(gross_salary_FY2023_24, @FindText, @ReplaceText);");
+
+                // Prepare and execute the SQL command
+                using var command = new MySqlCommand(query.ToString(), connection);
+                command.Parameters.AddWithValue("@FindText", request.FindText);
+                command.Parameters.AddWithValue("@ReplaceText", request.ReplaceText);
+                var result = await command.ExecuteNonQueryAsync();
+
+                await connection.CloseAsync();
+
+                // Return the result of the bulk update
+                return Ok(new { Message = "Find and Replace successful", RowsAffected = result });
+            }
+            catch (MySqlException ex)
+            {
+                // Log the exception and return an InternalServerError response
+                Console.WriteLine($"Database error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An error occurred while Deleting the records.");
+            }
+            catch (Exception ex)
+            {
+                // Log unexpected exceptions and return an InternalServerError response
+                Console.WriteLine($"Unexpected error occurred: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred.");
+            }
+        }
     }
 }

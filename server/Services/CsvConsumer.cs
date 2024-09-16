@@ -22,10 +22,10 @@ public class CsvConsumer
 
     private readonly IHubContext<ProgressHub>? _hubContext;
 
-    int numberOfQueues=0;
     private List<Task> insert=new List<Task>();
     private int totalChunksProcessed;
     private int totalChunksExpected;
+    private int temp=0;
     public CsvConsumer(IConfiguration configuration,IConnectionFactory connectionFactory, IHubContext<ProgressHub> hubContext)
     {
         _configuration = configuration;
@@ -58,8 +58,9 @@ public class CsvConsumer
             if (csvRecords != null)
             {
                 insert.Add(Task.Run(async () => {
+                    temp++;
                     await MultipleInsert(csvRecords);
-                    await UpdateProgress();
+                    await UpdateProgress(temp);
                 }));
 
             }
@@ -68,7 +69,7 @@ public class CsvConsumer
         Console.WriteLine(queueNumber);
         _channel.BasicConsume(queue: $"queue{queueNumber}", autoAck: true, consumer: consumer);
     }
-    private async Task UpdateProgress()
+    private async Task UpdateProgress(int e)
     {
         if (_hubContext == null){
             throw new InvalidOperationException("HubContext is not available.");
@@ -78,7 +79,7 @@ public class CsvConsumer
         // Calculate percentage (assume 10 chunks)
         var progressPercentage = totalChunksProcessed /(double)totalChunksExpected;
 
-        Console.WriteLine($"Chunk {totalChunksProcessed} processed. Progress: {progressPercentage}%");
+        Console.WriteLine($"Chunk{e} {totalChunksProcessed} processed. Progress: {progressPercentage}%");
 
         // Send progress to frontend via SignalR
         await _hubContext.Clients.All.SendAsync("ReceiveProgress", progressPercentage*100);
@@ -107,6 +108,7 @@ public class CsvConsumer
         await connection.OpenAsync();
 
         Console.WriteLine("Sql complete");
+        Console.WriteLine(temp);
         using var command = new MySqlCommand(sql.ToString(), connection);
         await command.ExecuteNonQueryAsync();
         await connection.CloseAsync();
